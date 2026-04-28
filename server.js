@@ -1,5 +1,5 @@
 const dotenv = require("dotenv");
-dotenv.config(); // ← FIRST before everything
+dotenv.config();
 
 const express = require("express");
 const cors = require("cors");
@@ -18,6 +18,17 @@ app.use(
     credentials: true,
   }),
 );
+
+// Fix for Safari Tracking Prevention
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", req.headers.origin || "*");
+  res.header("Access-Control-Allow-Credentials", "true");
+  res.header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (req.method === "OPTIONS") return res.sendStatus(200);
+  next();
+});
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
