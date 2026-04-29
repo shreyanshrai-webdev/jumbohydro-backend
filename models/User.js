@@ -52,7 +52,7 @@ const userSchema = new mongoose.Schema(
     },
     preferredCurrency: {
       type: String,
-      enum: ["INR", "USD", "EUR", "GBP"],
+      enum: ["INR", "USD", "EUR", "GBP", "RUB"],
       default: "INR",
     },
   },
