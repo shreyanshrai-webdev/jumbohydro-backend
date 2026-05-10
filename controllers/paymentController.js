@@ -1,92 +1,75 @@
 const Order = require("../models/Order");
-const crypto = require("crypto");
+const cashfreeService = require("../services/cashfreeService");
+const payuService = require("../services/payuService");
+const razorpayService = require("../services/razorpayService");
 
-// Cashfree API base URLs
-const CASHFREE_BASE_URL =
-  process.env.CASHFREE_ENV === "PROD"
-    ? "https://api.cashfree.com/pg"
-    : "https://sandbox.cashfree.com/pg";
+// Add new gateways here in the future — no other code needs to change
+const gateways = {
+  cashfree: cashfreeService,
+  payu: payuService,
+  razorpay: razorpayService,
+};
 
-// Currency symbols for Cashfree
-const CURRENCY_CODES = { INR: "INR", USD: "USD", EUR: "EUR", GBP: "GBP" };
-
+// POST /api/payment/create
+// Body: { orderId, gateway }   gateway defaults to "cashfree" if not sent
 exports.createPayment = async (req, res) => {
   try {
-    const { orderId } = req.body;
+    const { orderId, gateway = "cashfree" } = req.body;
+
+    const service = gateways[gateway];
+    if (!service) {
+      return res.status(400).json({ message: `Unknown gateway: ${gateway}` });
+    }
+
     const order = await Order.findById(orderId).populate(
       "user",
       "name email phone",
     );
     if (!order) return res.status(404).json({ message: "Order not found" });
 
-    const cashfreeOrder = {
-      order_id: order.orderId,
-      order_amount: order.totalAmount,
-      order_currency: CURRENCY_CODES[order.currency] || "INR",
-      customer_details: {
-        customer_id: order.user._id.toString(),
-        customer_name: order.user.name,
-        customer_email: order.user.email,
-        customer_phone: order.shippingAddress.phone || "9999999999",
-      },
-      order_meta: {
-        return_url: `${process.env.FRONTEND_URL}/order-tracking/${order.orderId}?payment=success`,
-        notify_url: `${process.env.BACKEND_URL}/api/payment/webhook`,
-      },
-    };
-
-    const response = await fetch(`${CASHFREE_BASE_URL}/orders`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-version": "2023-08-01",
-        "x-client-id": process.env.CASHFREE_APP_ID,
-        "x-client-secret": process.env.CASHFREE_SECRET_KEY,
-      },
-      body: JSON.stringify(cashfreeOrder),
-    });
-
-    const data = await response.json();
-    if (!response.ok)
-      return res
-        .status(400)
-        .json({ message: data.message || "Payment creation failed" });
-
-    res.json({
-      paymentSessionId: data.payment_session_id,
-      orderId: order.orderId,
-      cashfreeOrderId: data.order_id,
-    });
+    const result = await service.createPayment(order);
+    res.json(result);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 };
 
+// POST /api/payment/verify
+// Body: { orderId, gateway, razorpayOrderId, razorpayPaymentId, razorpaySignature }
 exports.verifyPayment = async (req, res) => {
   try {
-    const { orderId } = req.body;
+    const {
+      orderId,
+      gateway = "cashfree",
+      razorpayOrderId,
+      razorpayPaymentId,
+      razorpaySignature,
+    } = req.body;
 
-    const response = await fetch(
-      `${CASHFREE_BASE_URL}/orders/${orderId}/payments`,
-      {
-        method: "GET",
-        headers: {
-          "x-api-version": "2023-08-01",
-          "x-client-id": process.env.CASHFREE_APP_ID,
-          "x-client-secret": process.env.CASHFREE_SECRET_KEY,
-        },
-      },
-    );
+    const service = gateways[gateway];
+    if (!service) {
+      return res.status(400).json({ message: `Unknown gateway: ${gateway}` });
+    }
 
-    const data = await response.json();
-    const payment = Array.isArray(data) ? data[0] : null;
+    let result;
 
-    if (payment && payment.payment_status === "SUCCESS") {
+    if (gateway === "razorpay") {
+      // Razorpay needs its own 3 fields for signature verification
+      result = await razorpayService.verifyPayment(
+        razorpayOrderId,
+        razorpayPaymentId,
+        razorpaySignature,
+      );
+    } else {
+      result = await service.verifyPayment(orderId);
+    }
+
+    if (result.success) {
       await Order.findOneAndUpdate(
         { orderId },
         {
           paymentStatus: "paid",
-          paymentId: payment.cf_payment_id,
+          paymentId: result.paymentId,
           orderStatus: "confirmed",
         },
       );
@@ -102,6 +85,8 @@ exports.verifyPayment = async (req, res) => {
   }
 };
 
+// POST /api/payment/webhook
+// Cashfree calls this automatically after payment
 exports.webhook = async (req, res) => {
   try {
     const { data } = req.body;
